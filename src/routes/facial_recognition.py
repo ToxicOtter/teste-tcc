@@ -7,6 +7,7 @@ from datetime import datetime
 import base64
 from io import BytesIO
 from PIL import Image
+import logging
 
 from src.models.user import User, DetectionLog, Notification, db
 
@@ -15,6 +16,34 @@ facial_bp = Blueprint('facial', __name__)
 # Configurações
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
+
+# Contadores globais
+total_verificacoes = 0
+total_reconhecidos = 0
+
+# Logger para salvar em arquivo
+log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs')
+os.makedirs(log_dir, exist_ok=True)
+log_path = os.path.join(log_dir, 'reconhecimento.log')
+
+logging.basicConfig(
+    filename=log_path,
+    level=logging.INFO,
+    format='[%(asctime)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+def calcular_iluminacao(image_path):
+    """Calcula a média de iluminação da imagem (escala de cinza)"""
+    try:
+        imagem = cv2.imread(image_path)
+        if imagem is None:
+            return 0.0
+        gray = cv2.cvtColor(imagem, cv2.COLOR_BGR2GRAY)
+        return np.mean(gray)
+    except Exception as e:
+        print(f"Erro ao calcular iluminação: {e}")
+        return 0.0
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -90,9 +119,13 @@ def compare_faces(face_encoding1, face_encoding2, threshold=0.6):
 @facial_bp.route('/images', methods=['POST'])
 def receive_image():
     """Recebe imagem do ESP32 e processa reconhecimento facial"""
+    
+    
     try:
         upload_path = ensure_upload_folder()
         
+        inicio = datetime.now()
+
         # Verifica se há arquivo na requisição
         if 'image' not in request.files:
             return jsonify({'error': 'Nenhuma imagem enviada'}), 400
@@ -106,6 +139,10 @@ def receive_image():
             filename = secure_filename(f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}")
             file_path = os.path.join(upload_path, filename)
             file.save(file_path)
+
+            global total_verificacoes, total_reconhecidos
+            total_verificacoes += 1
+            iluminacao = calcular_iluminacao(file_path)
             
             # Detecta faces na imagem
             faces = detect_faces_opencv(file_path)
@@ -119,10 +156,18 @@ def receive_image():
                 db.session.add(detection_log)
                 db.session.commit()
                 
+                fim = datetime.now()
+                duracao = (fim - inicio).total_seconds() * 1000  # em ms
+
+                status = 'no_face'
+                print(f"[{datetime.now()}] IP: {request.remote_addr} | Status: {status} | Iluminação: {iluminacao:.2f} | Reconhecido: não | Tempo resposta: {duracao:.2f} ms")
+                logging.info(f"IP: {request.remote_addr} | Status: {status} | Iluminação: {iluminacao:.2f} | Reconhecido: não | Tempo resposta: {duracao:.2f} ms")
+
                 return jsonify({
                     'status': 'no_face',
                     'message': 'Nenhuma face detectada na imagem',
-                    'detection_id': detection_log.id
+                    'detection_id': detection_log.id,
+                    'tempo_resposta_ms': duracao
                 })
             
             # Processa a primeira face detectada
@@ -137,9 +182,16 @@ def receive_image():
                 db.session.add(detection_log)
                 db.session.commit()
                 
+                fim = datetime.now()
+                duracao = (fim - inicio).total_seconds() * 1000  # em ms
+
+                status = 'error'
+                print(f"[{datetime.now()}] IP: {request.remote_addr} | Status: {status} | Iluminação: {iluminacao:.2f} | Reconhecido: não | Tempo resposta: {duracao:.2f} ms")
+                logging.info(f"IP: {request.remote_addr} | Status: {status} | Iluminação: {iluminacao:.2f} | Reconhecido: não | Tempo resposta: {duracao:.2f} ms")
                 return jsonify({
                     'status': 'error',
-                    'message': 'Erro ao processar a face detectada'
+                    'message': 'Erro ao processar a face detectada',
+                    'tempo_resposta_ms': duracao
                 })
             
             # Compara com usuários cadastrados
@@ -177,12 +229,20 @@ def receive_image():
                 
                 db.session.commit()
                 
+                total_reconhecidos += 1
+                fim = datetime.now()
+                duracao = (fim - inicio).total_seconds() * 1000  # em ms
+                status = 'recognized'
+                print(f"[{datetime.now()}] IP: {request.remote_addr} | Status: {status} | Iluminação: {iluminacao:.2f} | Reconhecido: sim | Tempo resposta: {duracao:.2f} ms")
+                logging.info(f"IP: {request.remote_addr} | Status: {status} | Iluminação: {iluminacao:.2f} | Reconhecido: sim | Usuário: {best_match.username} ({best_similarity:.2%}) | Tempo resposta: {duracao:.2f} ms")
+
                 return jsonify({
                     'status': 'recognized',
                     'user': best_match.to_dict(),
                     'confidence': best_similarity,
                     'detection_id': detection_log.id,
-                    'message': f"Usuário {best_match.username} reconhecido com {best_similarity:.2%} de confiança"
+                    'message': f"Usuário {best_match.username} reconhecido com {best_similarity:.2%} de confiança",
+                    'tempo_resposta_ms': duracao
                 })
             else:
                 # Usuário não reconhecido
@@ -193,15 +253,25 @@ def receive_image():
                 db.session.add(detection_log)
                 db.session.commit()
                 
+                fim = datetime.now()
+                duracao = (fim - inicio).total_seconds() * 1000  # em ms
+
+                status = 'unknown'
+                print(f"[{datetime.now()}] IP: {request.remote_addr} | Status: {status} | Iluminação: {iluminacao:.2f} | Reconhecido: não | Tempo resposta: {duracao:.2f} ms")
+                logging.info(f"IP: {request.remote_addr} | Status: {status} | Iluminação: {iluminacao:.2f} | Reconhecido: não | Tempo resposta: {duracao:.2f} ms")
+
                 return jsonify({
                     'status': 'unknown',
                     'message': 'Face detectada mas usuário não reconhecido',
-                    'detection_id': detection_log.id
+                    'detection_id': detection_log.id,
+                    'tempo_resposta_ms': duracao
                 })
         
         return jsonify({'error': 'Tipo de arquivo não permitido'}), 400
         
     except Exception as e:
+        fim = datetime.now()
+        duracao = (fim - inicio).total_seconds() * 1000  # em ms
         return jsonify({'error': f'Erro interno do servidor: {str(e)}'}), 500
 
 @facial_bp.route('/images/base64', methods=['POST'])
