@@ -89,32 +89,63 @@ def extract_face_features(image_path, face_coords):
         
         # Redimensiona para tamanho padrão
         face_resized = cv2.resize(face_roi, (100, 100))
+
         
         # Converte para escala de cinza e normaliza
         face_gray = cv2.cvtColor(face_resized, cv2.COLOR_BGR2GRAY)
-        face_normalized = face_gray.flatten().astype(np.float32) / 255.0
+        face_gray = cv2.equalizeHist(face_gray)  # normaliza iluminação
+        #face_normalized = face_gray.flatten().astype(np.float32) / 255.0
         
-        return face_normalized
+        v = face_gray.astype(np.float32).flatten() / 255.0
+        v = v - v.mean()
+        std = v.std()
+        if std < 1e-6:
+            return None
+        v = v / std  # z-score -> ajuda MUITO na cosseno
+        #return face_normalized
+        return v
     except Exception as e:
         print(f"Erro na extração de características: {e}")
         return None
 
-def compare_faces(face_encoding1, face_encoding2, threshold=0.6):
-    """Compara duas faces usando distância euclidiana"""
-    try:
-        if face_encoding1 is None or face_encoding2 is None:
-            return False, 0.0
-        
-        # Calcula distância euclidiana
-        distance = np.linalg.norm(face_encoding1 - face_encoding2)
-        
-        # Converte para similaridade (0-1, onde 1 é idêntico)
-        similarity = max(0, 1 - distance)
-        
-        return similarity > threshold, similarity
-    except Exception as e:
-        print(f"Erro na comparação de faces: {e}")
+#versao 1
+#def compare_faces(face_encoding1, face_encoding2, threshold=0.6):
+#    """Compara duas faces usando distância euclidiana"""
+#    try:
+#        if face_encoding1 is None or face_encoding2 is None:
+#            return False, 0.0
+#        
+#        # Calcula distância euclidiana
+#        distance = np.linalg.norm(face_encoding1 - face_encoding2)
+#        
+#        # Converte para similaridade (0-1, onde 1 é idêntico)
+#        similarity = max(0, 1 - distance)
+#        print(similarity)
+#        return similarity > threshold, similarity
+#    except Exception as e:
+#        print(f"Erro na comparação de faces: {e}")
+#        return False, 0.0
+
+# versao 2 - funcionou
+def compare_faces(face_vec1, face_vec2, threshold=0.5):
+    """Similaridade cosseno (1 = idêntico, -1 = oposto)."""
+    if face_vec1 is None or face_vec2 is None:
         return False, 0.0
+    # garante float32 e shapes corretos
+    a = face_vec1.astype(np.float32).ravel()
+    b = face_vec2.astype(np.float32).ravel()
+    if a.shape != b.shape:
+        return False, 0.0
+
+    denom = (np.linalg.norm(a) * np.linalg.norm(b))
+    if denom < 1e-6:
+        return False, 0.0
+    cos_sim = float(np.dot(a, b) / denom)  # [-1,1]
+    sim_01 = (cos_sim + 1) / 2.0           # [0,1] mais intuitivo
+    print(sim_01)
+    return sim_01 >= threshold, sim_01
+
+
 
 @facial_bp.route('/images', methods=['POST'])
 def receive_image():
